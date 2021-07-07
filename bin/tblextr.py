@@ -24,13 +24,9 @@
 
 import os, sys, re
 from sqlitedb import SQLiteDB
+from json_utils import JSON 
+from csv_builder import CSV 
 import dform
-
-# Parsing results in the format:
-#dispatch[0], queue_index(0), kernel_name("SimpleConvolution"), time(1048928000311041,1048928006154674,1048928006168274,1048928006170503):
-#  GRBM_GUI_ACTIVE (74332)
-#  SQ_WAVES (4096)
-#  SQ_INSTS_VMEM_RD (36864)
 
 EXT_PID = 0
 COPY_PID = 1
@@ -47,8 +43,8 @@ START_US = 0
 hsa_activity_found = 0
 
 # dependencies dictionary
-dep_dict = {}
-kern_dep_list = []
+#dep_dict = {}
+#kern_dep_list = []
 
 # global vars
 table_descr = [
@@ -57,8 +53,160 @@ table_descr = [
 ]
 var_list = table_descr[0]
 var_table = {}
-#############################################################
 
+# Parsing results in the format:
+#dispatch[0], queue_index(0), kernel_name("SimpleConvolution"), time(1048928000311041,1048928006154674,1048928006168274,1048928006170503):
+#  GRBM_GUI_ACTIVE (74332)
+#  SQ_WAVES (4096)
+#  SQ_INSTS_VMEM_RD (36864)
+
+class dependencies:
+
+  def __init__(self):
+    self.dep_dict = {}
+    self.kern_dep_list = []
+
+dep_obj = dependencies()
+dep_dict = dep_obj.dep_dict
+kern_dep_list = dep_obj.kern_dep_list
+
+#############################################################
+class domains:
+
+  def __init__(self, table_name, trace_name):
+    self.table_name = table_name 
+    self.trace_name = trace_name
+
+  def fill_ext_db( db, indir, api_pid):
+    (table_name, trace_name) = (self.table_name, self.trace_name)
+    file_name = indir + '/' + trace_name + '_trace.txt'
+    ptrn_val = re.compile(r'(\d+) (\d+):(\d+) (\d+):(.*)$')
+  
+    if not os.path.isfile(file_name): return 0
+  
+    range_stack = {}
+  
+    record_id = 0
+    table_handle = db.add_table(table_name, ext_table_descr)
+    with open(file_name, mode='r') as fd:
+      for line in fd.readlines():
+        record = line[:-1]
+        m = ptrn_val.match(record)
+        if m:
+          tms = int(m.group(1))
+          pid = m.group(2)
+          tid = m.group(3)
+          cid = int(m.group(4))
+          msg = m.group(5)
+  
+          rec_vals = []
+  
+          if cid != 2:
+            rec_vals.append(tms)
+            rec_vals.append(tms + 1)
+            rec_vals.append(api_pid)
+            rec_vals.append(tid)
+            rec_vals.append(msg)
+            rec_vals.append(record_id)
+  
+          if cid == 1:
+            if not pid in range_stack: range_stack[pid] = {}
+            pid_stack = range_stack[pid]
+            if not tid in pid_stack: pid_stack[tid] = []
+            rec_stack = pid_stack[tid]
+            rec_stack.append(rec_vals)
+            continue
+  
+          if cid == 2:
+            pid_stack = range_stack[pid]
+            rec_stack = pid_stack[tid]
+            rec_vals = rec_stack.pop()
+            rec_vals[1] = tms
+  
+          db.insert_entry(table_handle, rec_vals)
+          record_id += 1
+  
+    return 1
+
+
+  def fill_api_db(db, indir, api_pid, dep_pid, dep_list, dep_filtr, expl_id):
+    (table_name, api_name) = (self.table_name, self.trace_name)
+    global hsa_activity_found
+    copy_rows = []
+    if (hsa_activity_found): copy_rows = db.table_get_rows('COPY')
+    copy_csv = ''
+    copy_index = 0
+  
+    file_name = indir + '/' + api_name + '_api_trace.txt'
+    ptrn_val = re.compile(r'(\d+):(\d+) (\d+):(\d+) ([^\(]+)(\(.*)$')
+    ptrn_ac = re.compile(r'hsa_amd_memory_async_copy')
+  
+    if not os.path.isfile(file_name): return 0
+  
+    dep_tid_list = []
+    dep_from_us_list = []
+    dep_id_list = []
+  
+    global START_US
+    with open(file_name, mode='r') as fd:
+      line = fd.readline()
+      record = line[:-1]
+      m = ptrn_val.match(record)
+      if m: START_US = int(m.group(1)) / 1000
+      START_US = 0
+  
+    record_id = 0
+    table_handle = db.add_table(table_name, api_table_descr)
+    with open(file_name, mode='r') as fd:
+      for line in fd.readlines():
+        record = line[:-1]
+        m = ptrn_val.match(record)
+        if m:
+          rec_vals = []
+          rec_len = len(api_table_descr[0])
+          for ind in range(1,rec_len):
+            rec_vals.append(m.group(ind))
+          rec_vals[2] = api_pid
+          rec_vals.append(record_id)
+          db.insert_entry(table_handle, rec_vals)
+          if ptrn_ac.search(rec_vals[4]) or record_id in dep_filtr:
+            beg_ns = int(rec_vals[0])
+            end_ns = int(rec_vals[1])
+            from_us = (beg_ns / 1000) + ((end_ns - beg_ns) / 1000)
+            dep_from_us_list.append(from_us)
+            dep_tid_list.append(int(rec_vals[3]))
+            dep_id_list.append(record_id) 
+  
+            if len(copy_rows) != 0:
+              copy_data = list(copy_rows[copy_index])
+              args_str = rec_vals[5]
+              args_str = re.sub(r'\(', r'', args_str)
+              args_str = re.sub(r'\).*$', r'', args_str)
+              copy_line = str(copy_data[0]) + ', ' + str(copy_data[1]) + ', ' + rec_vals[4] + ', ' + args_str
+              copy_csv += str(copy_index) + ', ' + copy_line + '\n'
+              copy_index += 1
+  
+          record_id += 1
+        else: fatal(api_name + " bad record: '" + record + "'")
+  
+    for (tid, from_ns) in dep_list:
+      db.insert_entry(table_handle, [from_ns, from_ns, api_pid, tid, 'hsa_dispatch', '', record_id])
+      record_id += 1
+  
+    if dep_pid != NONE_PID:
+      if not dep_pid in dep_dict: dep_dict[dep_pid] = {}
+      dep_dict[dep_pid]['pid'] = api_pid
+      dep_dict[dep_pid]['tid'] = dep_tid_list
+      dep_dict[dep_pid]['from'] = dep_from_us_list
+      if expl_id: dep_dict[dep_pid]['id'] = dep_id_list
+  
+    if copy_csv != '':
+      file_name = os.environ['PWD'] + '/results_mcopy.csv'
+      with open(file_name, mode='w') as fd:
+        print("File '" + file_name + "' is generating")
+        fd.write(copy_csv)
+  
+    return 1
 def fatal(msg):
   sys.stderr.write(sys.argv[0] + ": " + msg + "\n");
   sys.exit(1)
@@ -156,24 +304,7 @@ def merge_table():
     var_list.append('EndNs')
     var_list.append('CompleteNs')
   var_list = [x for x in var_list if x in fields]
-#############################################################
 
-# dump CSV results
-def dump_csv(file_name):
-  global var_list
-  keys = sorted(var_table.keys(), key=int)
-
-  with open(file_name, mode='w') as fd:
-    fd.write(','.join(var_list) + '\n');
-    for ind in keys:
-      entry = var_table[ind]
-      dispatch_number = entry['Index']
-      if ind != dispatch_number: fatal("Dispatch #" + ind + " index mismatch (" + dispatch_number + ")\n")
-      val_list = [entry[var] for var in var_list]
-      fd.write(','.join(val_list) + '\n');
-
-  print("File '" + file_name + "' is generating")
-#############################################################
 
 # fill kernels DB
 def fill_kernel_db(table_name, db):
@@ -192,153 +323,7 @@ def fill_kernel_db(table_name, db):
     if ind != dispatch_number: fatal("Dispatch #" + ind + " index mismatch (" + dispatch_number + ")\n")
     val_list = [entry[var] for var in var_list]
     db.insert_entry(table_handle, val_list)
-#############################################################
 
-# Fill Ext DB
-ext_table_descr = [
-  ['BeginNs', 'EndNs', 'pid', 'tid', 'Name', 'Index'],
-  {'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER', 'Name':'TEXT', 'Index':'INTEGER'}
-]
-def fill_ext_db(table_name, db, indir, trace_name, api_pid):
-  file_name = indir + '/' + trace_name + '_trace.txt'
-  ptrn_val = re.compile(r'(\d+) (\d+):(\d+) (\d+):(.*)$')
-
-  if not os.path.isfile(file_name): return 0
-
-  range_stack = {}
-
-  record_id = 0
-  table_handle = db.add_table(table_name, ext_table_descr)
-  with open(file_name, mode='r') as fd:
-    for line in fd.readlines():
-      record = line[:-1]
-      m = ptrn_val.match(record)
-      if m:
-        tms = int(m.group(1))
-        pid = m.group(2)
-        tid = m.group(3)
-        cid = int(m.group(4))
-        msg = m.group(5)
-
-        rec_vals = []
-
-        if cid != 2:
-          rec_vals.append(tms)
-          rec_vals.append(tms + 1)
-          rec_vals.append(api_pid)
-          rec_vals.append(tid)
-          rec_vals.append(msg)
-          rec_vals.append(record_id)
-
-        if cid == 1:
-          if not pid in range_stack: range_stack[pid] = {}
-          pid_stack = range_stack[pid]
-          if not tid in pid_stack: pid_stack[tid] = []
-          rec_stack = pid_stack[tid]
-          rec_stack.append(rec_vals)
-          continue
-
-        if cid == 2:
-          pid_stack = range_stack[pid]
-          rec_stack = pid_stack[tid]
-          rec_vals = rec_stack.pop()
-          rec_vals[1] = tms
-
-        db.insert_entry(table_handle, rec_vals)
-        record_id += 1
-
-  return 1
-#############################################################
-
-# Fill API DB
-api_table_descr = [
-  ['BeginNs', 'EndNs', 'pid', 'tid', 'Name', 'args', 'Index'],
-  {'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'Index':'INTEGER'}
-]
-def fill_api_db(table_name, db, indir, api_name, api_pid, dep_pid, dep_list, dep_filtr, expl_id):
-  global hsa_activity_found
-  copy_raws = []
-  if (hsa_activity_found): copy_raws = db.table_get_raws('COPY')
-  copy_csv = ''
-  copy_index = 0
-
-  file_name = indir + '/' + api_name + '_api_trace.txt'
-  ptrn_val = re.compile(r'(\d+):(\d+) (\d+):(\d+) ([^\(]+)(\(.*)$')
-  ptrn_ac = re.compile(r'hsa_amd_memory_async_copy')
-
-  if not os.path.isfile(file_name): return 0
-
-  dep_tid_list = []
-  dep_from_us_list = []
-  dep_id_list = []
-
-  global START_US
-  with open(file_name, mode='r') as fd:
-    line = fd.readline()
-    record = line[:-1]
-    m = ptrn_val.match(record)
-    if m: START_US = int(m.group(1)) / 1000
-    START_US = 0
-
-  record_id = 0
-  table_handle = db.add_table(table_name, api_table_descr)
-  with open(file_name, mode='r') as fd:
-    for line in fd.readlines():
-      record = line[:-1]
-      m = ptrn_val.match(record)
-      if m:
-        rec_vals = []
-        rec_len = len(api_table_descr[0])
-        for ind in range(1,rec_len):
-          rec_vals.append(m.group(ind))
-        rec_vals[2] = api_pid
-        rec_vals.append(record_id)
-        db.insert_entry(table_handle, rec_vals)
-        if ptrn_ac.search(rec_vals[4]) or record_id in dep_filtr:
-          beg_ns = int(rec_vals[0])
-          end_ns = int(rec_vals[1])
-          from_us = (beg_ns / 1000) + ((end_ns - beg_ns) / 1000)
-          dep_from_us_list.append(from_us)
-          dep_tid_list.append(int(rec_vals[3]))
-          dep_id_list.append(record_id) 
-
-          if len(copy_raws) != 0:
-            copy_data = list(copy_raws[copy_index])
-            args_str = rec_vals[5]
-            args_str = re.sub(r'\(', r'', args_str)
-            args_str = re.sub(r'\).*$', r'', args_str)
-            copy_line = str(copy_data[0]) + ', ' + str(copy_data[1]) + ', ' + rec_vals[4] + ', ' + args_str
-            copy_csv += str(copy_index) + ', ' + copy_line + '\n'
-            copy_index += 1
-
-        record_id += 1
-      else: fatal(api_name + " bad record: '" + record + "'")
-
-  for (tid, from_ns) in dep_list:
-    db.insert_entry(table_handle, [from_ns, from_ns, api_pid, tid, 'hsa_dispatch', '', record_id])
-    record_id += 1
-
-  if dep_pid != NONE_PID:
-    if not dep_pid in dep_dict: dep_dict[dep_pid] = {}
-    dep_dict[dep_pid]['pid'] = api_pid
-    dep_dict[dep_pid]['tid'] = dep_tid_list
-    dep_dict[dep_pid]['from'] = dep_from_us_list
-    if expl_id: dep_dict[dep_pid]['id'] = dep_id_list
-
-  if copy_csv != '':
-    file_name = os.environ['PWD'] + '/results_mcopy.csv'
-    with open(file_name, mode='w') as fd:
-      print("File '" + file_name + "' is generating")
-      fd.write(copy_csv)
-
-  return 1
-#############################################################
-
-# fill COPY DB
-copy_table_descr = [
-  ['BeginNs', 'EndNs', 'Name', 'pid', 'tid', 'Index'],
-  {'Index':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER'}
-]
 def fill_copy_db(table_name, db, indir):
   file_name = indir + '/' + 'async_copy_trace.txt'
   ptrn_val = re.compile(r'(\d+):(\d+) (.*)$')
@@ -369,13 +354,8 @@ def fill_copy_db(table_name, db, indir):
   dep_dict[COPY_PID]['to'] = dep_to_us_dict
 
   return 1
-#############################################################
 
-# fill HCC ops DB
-ops_table_descr = [
-  ['BeginNs', 'EndNs', 'dev-id', 'queue-id', 'Name', 'pid', 'tid', 'Index'],
-  {'Index':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'dev-id':'INTEGER', 'queue-id':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER'}
-]
+
 def fill_ops_db(table_name, db, indir):
   global max_gpu_id
   file_name = indir + '/' + 'hcc_ops_trace.txt'
@@ -416,6 +396,34 @@ def fill_ops_db(table_name, db, indir):
 
   return filtr
 #############################################################
+
+# Fill Ext DB
+ext_table_descr = [
+  ['BeginNs', 'EndNs', 'pid', 'tid', 'Name', 'Index'],
+  {'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER', 'Name':'TEXT', 'Index':'INTEGER'}
+]
+#############################################################
+
+# Fill API DB
+api_table_descr = [
+  ['BeginNs', 'EndNs', 'pid', 'tid', 'Name', 'args', 'Index'],
+  {'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'Index':'INTEGER'}
+]
+#############################################################
+
+# fill COPY DB
+copy_table_descr = [
+  ['BeginNs', 'EndNs', 'Name', 'pid', 'tid', 'Index'],
+  {'Index':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER'}
+]
+#############################################################
+
+# fill HCC ops DB
+ops_table_descr = [
+  ['BeginNs', 'EndNs', 'dev-id', 'queue-id', 'Name', 'pid', 'tid', 'Index'],
+  {'Index':'INTEGER', 'Name':'TEXT', 'args':'TEXT', 'BeginNs':'INTEGER', 'EndNs':'INTEGER', 'dev-id':'INTEGER', 'queue-id':'INTEGER', 'pid':'INTEGER', 'tid':'INTEGER'}
+]
+#############################################################
 # main
 if (len(sys.argv) < 2): fatal("Usage: " + sys.argv[0] + " <output CSV file> <input result files list>")
 
@@ -441,7 +449,8 @@ if inext == '.txt':
   if len(var_table) != 0: merge_table()
 
 if dbfile == '':
-  dump_csv(csvfile)
+  csv_obj = CSV(csvfile)
+  csv_obj.dump_csv_fromtable(var_list,var_table)
 else:
   statfile = re.sub(r'\.csv$', '.stats.csv', csvfile)
   jsonfile = re.sub(r'\.csv$', '.json', csvfile)
@@ -452,72 +461,77 @@ else:
 
   with open(dbfile, mode='w') as fd: fd.truncate()
   db = SQLiteDB(dbfile)
+  json_obj = JSON(jsonfile)
+  dom_obj_roctx = domains('rocTX', 'roctx')
+  ext_trace_found = dom_obj_roctx.fill_ext_db(db, indir, EXT_PID)
 
-  ext_trace_found = fill_ext_db('rocTX', db, indir, 'roctx', EXT_PID)
+  dom_obj_kfd = domains('KFD', 'kfd')
+  kfd_trace_found = dom_obj_kfd.fill_api_db(db, indir, KFD_PID, NONE_PID, [], {}, 0)
 
-  kfd_trace_found = fill_api_db('KFD', db, indir, 'kfd', KFD_PID, NONE_PID, [], {}, 0)
-
+  dom_obj_hsa = domains('HSA', 'hsa')
   hsa_activity_found = fill_copy_db('COPY', db, indir)
-  hsa_trace_found = fill_api_db('HSA', db, indir, 'hsa', HSA_PID, COPY_PID, kern_dep_list, {}, 0)
+  hsa_trace_found = dom_obj_hsa.fill_api_db(db, indir, HSA_PID, COPY_PID, kern_dep_list, {}, 0)
 
+  dom_obj_hip = domains('HIP', 'hip')
   ops_filtr = fill_ops_db('OPS', db, indir)
-  hip_trace_found = fill_api_db('HIP', db, indir, 'hip', HIP_PID, OPS_PID, [], ops_filtr, 1)
+  hip_trace_found = dom_obj_hip.fill_api_db(db, indir, HIP_PID, OPS_PID, [], ops_filtr, 1)
 
   fill_kernel_db('A', db)
 
   any_trace_found = ext_trace_found | kfd_trace_found | hsa_trace_found | hip_trace_found
   if any_trace_found:
-    db.open_json(jsonfile)
+    json_obj.open_json()
 
   if ext_trace_found:
-    db.label_json(EXT_PID, "Markers and Ranges", jsonfile)
+    json_obj.label_json(EXT_PID, "Markers and Ranges", jsonfile)
 
   if hip_trace_found:
-    db.label_json(HIP_PID, "CPU HIP API", jsonfile)
+    json_obj.label_json(HIP_PID, "CPU HIP API", jsonfile)
 
   if hsa_trace_found:
-    db.label_json(HSA_PID, "CPU HSA API", jsonfile)
+    json_obj.label_json(HSA_PID, "CPU HSA API", jsonfile)
 
   if kfd_trace_found:
-    db.label_json(KFD_PID, "CPU KFD API", jsonfile)
+    json_obj.label_json(KFD_PID, "CPU KFD API", jsonfile)
 
   if hsa_activity_found:
-    db.label_json(COPY_PID, "COPY", jsonfile)
+    json_obj.label_json(COPY_PID, "COPY", jsonfile)
 
   if any_trace_found and max_gpu_id >= 0:
     for ind in range(0, int(max_gpu_id) + 1):
-      db.label_json(int(ind) + int(GPU_BASE_PID), "GPU" + str(ind), jsonfile)
+      json_obj.label_json(int(ind) + int(GPU_BASE_PID), "GPU" + str(ind), jsonfile)
 
   if ext_trace_found:
-    dform.gen_ext_json_trace(db, 'rocTX', START_US, jsonfile)
+    dform.gen_ext_json_trace(db, 'rocTX', START_US, json_obj)
 
   if len(var_table) != 0:
     dform.post_process_data(db, 'A', csvfile)
     dform.gen_table_bins(db, 'A', statfile, 'KernelName', 'DurationNs')
     if hsa_trace_found and 'BeginNs' in var_list:
-      dform.gen_kernel_json_trace(db, 'A', GPU_BASE_PID, START_US, jsonfile)
+      dform.gen_kernel_json_trace(db, 'A', GPU_BASE_PID, START_US, json_obj)
 
+  tag = ''
   if hsa_trace_found:
-    dform.post_process_data(db, 'HSA')
-    dform.gen_table_bins(db, 'HSA', hsa_statfile, 'Name', 'DurationNs')
-    dform.gen_api_json_trace(db, 'HSA', START_US, jsonfile)
-
+    tag = 'HSA'
+    tagfile = hsa_statfile
   if hsa_activity_found:
-    dform.post_process_data(db, 'COPY')
-    dform.gen_api_json_trace(db, 'COPY', START_US, jsonfile)
-
+    tag = 'COPY'
+    tagfile = ''
   if hip_trace_found:
-    dform.post_process_data(db, 'HIP')
-    dform.gen_table_bins(db, 'HIP', hip_statfile, 'Name', 'DurationNs')
-    dform.gen_api_json_trace(db, 'HIP', START_US, jsonfile)
-
-    dform.post_process_data(db, 'OPS')
-    dform.gen_ops_json_trace(db, 'OPS', GPU_BASE_PID, START_US, jsonfile)
-
+    tag = 'HIP'
+    tagfile = hip_statfile
   if kfd_trace_found:
-    dform.post_process_data(db, 'KFD')
-    dform.gen_table_bins(db, 'KFD', kfd_statfile, 'Name', 'DurationNs')
-    dform.gen_api_json_trace(db, 'KFD', START_US, jsonfile)
+    tag = 'KFD'
+    tagfile = kfd_statfile
+
+  if tag == 'HSA' or tag == 'KFD' or tag == 'COPY' or tag == 'HIP':
+    dform.post_process_data(db, tag)
+    if tagfile != '':
+      dform.gen_table_bins(db, tag, tagfile, 'Name', 'DurationNs')
+    dform.gen_api_json_trace(db, tag, START_US, json_obj)
+    if tag == 'HIP':
+      dform.post_process_data(db, 'OPS')
+      dform.gen_ops_json_trace(db, 'OPS', GPU_BASE_PID, START_US, json_obj)
 
   if any_trace_found:
     for (to_pid, dep_str) in dep_dict.items():
@@ -540,11 +554,11 @@ else:
       corr_id_list = []
       if 'id' in dep_str: corr_id_list = dep_str['id']
 
-      db.flow_json(dep_id, from_pid, tid_list, from_us_list, to_pid, to_us_dict, corr_id_list, START_US, jsonfile)
+      json_obj.flow_json(dep_id, from_pid, tid_list, from_us_list, to_pid, to_us_dict, corr_id_list, START_US, jsonfile)
       dep_id += len(tid_list)
 
   if any_trace_found:
-    db.close_json(jsonfile);
+    json_obj.close_json();
   db.close()
 
 sys.exit(0)

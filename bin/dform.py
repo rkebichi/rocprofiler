@@ -1,5 +1,28 @@
 #!/usr/bin/python
+################################################################################
+# Copyright (c) 2018 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+################################################################################
+
 from sqlitedb import SQLiteDB
+from csv_builder import CSV
 
 def gen_message(outfile):
   if outfile != '':
@@ -11,7 +34,8 @@ def post_process_data(db, table_name, outfile = ''):
 #  db.add_data_column('A', 'TotalDurNs', 'INTEGER', 'CompleteNs - DispatchNs')
 #  db.add_data_column(table_name, 'TimeNs', 'INTEGER', 'BeginNs - %d' % start_ns)
   db.add_data_column(table_name, 'DurationNs', 'INTEGER', 'EndNs - BeginNs')
-  if outfile != '': db.dump_csv(table_name, outfile)
+  csv_obj = CSV(outfile)
+  if outfile != '': cvs_obj.dump_csv_fromdb(table_name) 
   gen_message(outfile)
 
 def gen_data_bins(db, outfile):
@@ -27,25 +51,25 @@ def gen_table_bins(db, table, outfile, name_var, dur_ns_var):
 
 def gen_api_json_trace(db, table, start_us, outfile):
   db.execute('create view B as select "Index", Name as name, pid, tid, (BeginNs/1000 - %d) as ts, (DurationNs/1000) as dur from %s;' % (start_us, table));
-  db.dump_json('B', table, outfile)
+  outfile.dump_json('B', table, db) 
   db.execute('DROP VIEW B')
-  gen_message(outfile)
+  gen_message(outfile.file_name)
 
 def gen_ext_json_trace(db, table, start_us, outfile):
   db.execute('create view B as select Name as name, pid, tid, (BeginNs/1000 - %d) as ts, ((EndNs - BeginNs)/1000) as dur from %s;' % (start_us, table));
-  db.dump_json('B', table, outfile)
+  outfile.dump_json('B', table, db)
   db.execute('DROP VIEW B')
-  gen_message(outfile)
+  gen_message(outfile.file_name)
 
 def gen_ops_json_trace(db, table, base_pid, start_us, outfile):
   db.execute('create view B as select "Index", Name as name, ("dev-id" + %d) as pid, tid, (BeginNs/1000 - %d) as ts, (DurationNs/1000) as dur from %s;' % (base_pid, start_us, table));
-  db.dump_json('B', table, outfile)
+  outfile.dump_json('B', table, db)
   db.execute('DROP VIEW B')
-  gen_message(outfile)
+  gen_message(outfile.file_name)
 
 def gen_kernel_json_trace(db, table, base_pid, start_us, outfile):
   db.execute('create view B as select "Index", KernelName as name, ("gpu-id" + %d) as pid, (0) as tid, (BeginNs/1000 - %d) as ts, (DurationNs/1000) as dur from %s;' % (base_pid, start_us, table));
-  db.dump_json('B', table, outfile)
+  outfile.dump_json('B', table,db)
   db.execute('DROP VIEW B')
-  gen_message(outfile)
+  gen_message(outfile.file_name)
 ##############################################################################################
